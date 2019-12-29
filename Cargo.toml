@@ -1,0 +1,15 @@
+[package]
+name = "nop-json-derive"
+version = "0.0.1"
+authors = ["Jeremiah Shaulov <jeremiah.shaulov@gmail.com>"]
+edition = "2018"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "*"
+syn = "1.0"
+quote = "*"
