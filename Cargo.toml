@@ -5,6 +5,8 @@ authors = ["Jeremiah Shaulov <jeremiah.shaulov@gmail.com>"]
 edition = "2018"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/jeremiah-shaulov/nop-json-derive"
+description = "Helper crate for internal use in nop-json"
 
 [lib]
 proc-macro = true
