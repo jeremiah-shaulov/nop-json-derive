@@ -228,7 +228,7 @@ fn impl_try_from_json(ast: &DeriveInput) -> Result<TokenStream, String>
 	let (impl_generics, ty_generics, where_clause) = get_generics(ast);
 	code = quote!
 	{	impl #impl_generics nop_json::TryFromJson for #name #ty_generics #where_clause
-		{	fn try_from_json<T>(reader: &mut nop_json::Reader<T>) -> std::io::Result<Self> where T: std::io::Read
+		{	fn try_from_json<T>(reader: &mut nop_json::Reader<T>) -> std::io::Result<Self> where T: Iterator<Item=u8>
 			{	use nop_json::OrDefault;
 				use nop_json::OkFromJson;
 				#code
@@ -384,6 +384,7 @@ fn get_json_name_for_enum_variant(attrs: &Vec<Attribute>, variant_name: &Ident, 
 fn parse_json_attr(attrs: &Vec<Attribute>, n_fields: usize, variant_name: Option<&Ident>) -> Result<(Option<String>, Vec<String>), String>
 {	let mut group_name = None;
 	let mut json_names = Vec::new();
+	let mut is_var_str = false;
 	for a in attrs
 	{	match a.parse_meta()
 		{	Ok(Meta::List(list)) =>
@@ -397,7 +398,7 @@ fn parse_json_attr(attrs: &Vec<Attribute>, n_fields: usize, variant_name: Option
 								json_names.push(s.value());
 							},
 							NestedMeta::Meta(Meta::Path(meta)) =>
-							{	if group_name.is_some()
+							{	if group_name.is_some() && !is_var_str
 								{	return Err("Cannot parse #[json(...)]".to_string());
 								}
 								if let Some(name) = meta.get_ident()
@@ -435,6 +436,23 @@ fn parse_json_attr(attrs: &Vec<Attribute>, n_fields: usize, variant_name: Option
 								{	return Err("Cannot parse #[json(...)]".to_string());
 								}
 							},
+							NestedMeta::Meta(Meta::NameValue(list)) =>
+							{	if group_name.is_some()
+								{	return Err("Cannot parse #[json(...)]".to_string());
+								}
+								if list.path.is_ident("var")
+								{	match list.lit
+									{	Lit::Str(s) =>
+										{	group_name = Some(s.value());
+											is_var_str = true;
+										},
+										_ => {}
+									}
+								}
+								if group_name.is_none()
+								{	return Err("Cannot parse #[json(...)]".to_string());
+								}
+							},
 							_ =>
 							{	return Err("Cannot parse #[json(...)]".to_string());
 							}
@@ -449,6 +467,9 @@ fn parse_json_attr(attrs: &Vec<Attribute>, n_fields: usize, variant_name: Option
 	{	if json_names.len() != n_fields
 		{	if json_names.len()==0
 			{	return Err(format!("Enum variant {} must have #[json(name_1, name_2, ...)] or #[json(variant_name(name_1, name_2, ...))]", variant_name));
+			}
+			else if n_fields==0 && json_names.len()==1 && group_name.is_none()
+			{	group_name = Some(json_names.pop().unwrap());
 			}
 			else
 			{	return Err(format!("#[json(...)] for enum variant {} must contain names for each member", variant_name));
