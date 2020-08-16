@@ -382,6 +382,18 @@ fn get_json_name_for_enum_variant(attrs: &Vec<Attribute>, variant_name: &Ident, 
 }
 
 fn parse_json_attr(attrs: &Vec<Attribute>, n_fields: usize, variant_name: Option<&Ident>) -> Result<(Option<String>, Vec<String>), String>
+{	parse_json_attr_sub(attrs, n_fields, variant_name.is_some()).map_err
+	(	|e|
+		if let Some(variant_name) = variant_name
+		{	format!("Cannot parse #[json(...)] in enum variant {}{}{}", variant_name, if e.is_empty() {""} else {": "}, e)
+		}
+		else
+		{	format!("Cannot parse #[json(...)]{}{}", if e.is_empty() {""} else {": "}, e)
+		}
+	)
+}
+
+fn parse_json_attr_sub(attrs: &Vec<Attribute>, n_fields: usize, is_enum: bool) -> Result<(Option<String>, Vec<String>), String>
 {	let mut group_name = None;
 	let mut json_names = Vec::new();
 	let mut is_var_str = false;
@@ -392,23 +404,23 @@ fn parse_json_attr(attrs: &Vec<Attribute>, n_fields: usize, variant_name: Option
 				{	for a in list.nested
 					{	match a
 						{	NestedMeta::Lit(Lit::Str(s)) =>
-							{	if group_name.is_some()
-								{	return Err("Cannot parse #[json(...)]".to_string());
+							{	if group_name.is_some() && !is_var_str
+								{	return Err(String::new());
 								}
 								json_names.push(s.value());
 							},
 							NestedMeta::Meta(Meta::Path(meta)) =>
 							{	if group_name.is_some() && !is_var_str
-								{	return Err("Cannot parse #[json(...)]".to_string());
+								{	return Err(String::new());
 								}
 								if let Some(name) = meta.get_ident()
 								{	json_names.push(name.to_string());
 								}
 							},
 							NestedMeta::Meta(Meta::List(list)) =>
-							{	if let Some(variant_name) = variant_name
+							{	if is_enum
 								{	if json_names.len() > 0
-									{	return Err(format!("Cannot parse #[json(...)] in enum variant {}", variant_name));
+									{	return Err(String::new());
 									}
 									if let Some(name) = list.path.get_ident()
 									{	group_name = Some(name.to_string());
@@ -423,38 +435,43 @@ fn parse_json_attr(attrs: &Vec<Attribute>, n_fields: usize, variant_name: Option
 													}
 												},
 												_ =>
-												{	return Err(format!("Cannot parse #[json(variant_name(...))] in enum variant {}", variant_name));
+												{	return Err(String::new());
 												}
 											}
 										}
 									}
 									if json_names.len() == 0
-									{	return Err(format!("Cannot parse #[json(variant_name(...))] in enum variant {}", variant_name));
+									{	return Err(String::new());
 									}
 								}
 								else
-								{	return Err("Cannot parse #[json(...)]".to_string());
+								{	return Err(String::new());
 								}
 							},
 							NestedMeta::Meta(Meta::NameValue(list)) =>
-							{	if group_name.is_some()
-								{	return Err("Cannot parse #[json(...)]".to_string());
-								}
-								if list.path.is_ident("var")
-								{	match list.lit
-									{	Lit::Str(s) =>
-										{	group_name = Some(s.value());
-											is_var_str = true;
-										},
-										_ => {}
+							{	if is_enum
+								{	if group_name.is_some()
+									{	return Err(String::new());
+									}
+									if list.path.is_ident("var")
+									{	match list.lit
+										{	Lit::Str(s) =>
+											{	group_name = Some(s.value());
+												is_var_str = true;
+											},
+											_ => {}
+										}
+									}
+									if group_name.is_none()
+									{	return Err(String::new());
 									}
 								}
-								if group_name.is_none()
-								{	return Err("Cannot parse #[json(...)]".to_string());
+								else
+								{	return Err(String::new());
 								}
 							},
 							_ =>
-							{	return Err("Cannot parse #[json(...)]".to_string());
+							{	return Err(String::new());
 							}
 						}
 					}
@@ -463,16 +480,16 @@ fn parse_json_attr(attrs: &Vec<Attribute>, n_fields: usize, variant_name: Option
 			_ => {}
 		}
 	}
-	if let Some(variant_name) = variant_name
+	if is_enum
 	{	if json_names.len() != n_fields
 		{	if json_names.len()==0
-			{	return Err(format!("Enum variant {} must have #[json(name_1, name_2, ...)] or #[json(variant_name(name_1, name_2, ...))]", variant_name));
+			{	return Err(format!("Enum variant must have #[json(name_1, name_2, ...)] or #[json(variant_name(name_1, name_2, ...))] or #[json(var=\"variant_name\", name_1, name_2, ...)]"));
 			}
 			else if n_fields==0 && json_names.len()==1 && group_name.is_none()
 			{	group_name = Some(json_names.pop().unwrap());
 			}
 			else
-			{	return Err(format!("#[json(...)] for enum variant {} must contain names for each member", variant_name));
+			{	return Err(format!("Must specify names for each member"));
 			}
 		}
 	}
