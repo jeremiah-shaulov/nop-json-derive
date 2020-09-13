@@ -125,7 +125,7 @@ fn impl_try_from_json(ast: &DeriveInput) -> Result<TokenStream, String>
 			code_3 = quote!( let result = Self{#code_3} );
 		},
 		Data::Enum(data_enum) =>
-		{	let enum_json_name = get_json_name(&ast.attrs, "enum")?.unwrap_or_else(|| String::new());
+		{	let enum_json_name = get_json_name(&ast.attrs, "enum")?.unwrap_or_default();
 			let mut fields = Vec::new();
 			let mut n_variant = 0;
 			let mut code_4 = quote!();
@@ -143,6 +143,8 @@ fn impl_try_from_json(ast: &DeriveInput) -> Result<TokenStream, String>
 					}
 					else
 					{	fields.push((n_variant, variant_name, json_name, Ident::new("u", Span::call_site())));
+						let variant_name = variant_name.to_string();
+						code_5 = quote!( #code_5 None.or_default().ok_or_else(|| reader.format_error(concat!("Transient member of variant \"", #variant_name, "\" must be #[derive(Default)]")))?, );
 					}
 				}
 				let pref_variant_name = Ident::new(&format!("Var{}", variant_name), Span::call_site());
@@ -299,7 +301,7 @@ fn impl_debug_to_json(ast: &DeriveInput) -> Result<TokenStream, String>
 			}
 		},
 		Data::Enum(data_enum) =>
-		{	let enum_json_name = get_json_name(&ast.attrs, "enum")?.unwrap_or_else(|| String::new());
+		{	let enum_json_name = get_json_name(&ast.attrs, "enum")?.unwrap_or_default();
 			for variant in &data_enum.variants
 			{	let variant_name = &variant.ident;
 				let (variant_name_str, json_names) = get_json_name_for_enum_variant(&variant.attrs, variant_name, variant.fields.len())?;
