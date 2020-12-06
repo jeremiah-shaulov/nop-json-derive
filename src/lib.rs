@@ -134,6 +134,7 @@ fn impl_try_from_json(ast: &DeriveInput) -> Result<TokenStream, String>
 				let (variant_name_str, json_names) = get_json_name_for_enum_variant(&variant.attrs, variant_name, variant.fields.len())?;
 				let mut n_field = 0;
 				let mut code_5 = quote!();
+				let has_fields = !json_names.is_empty();
 				for json_name in json_names
 				{	if !json_name.is_empty() // if not transient
 					{	let val_field = Ident::new(&format!("val_{}_{}", variant_name, n_field), Span::call_site());
@@ -153,7 +154,7 @@ fn impl_try_from_json(ast: &DeriveInput) -> Result<TokenStream, String>
 					let b = LitByteStr::new(variant_name_str.as_bytes(), Span::call_site());
 					code_2 = quote!( #code_2 #b => EnumVariant::#pref_variant_name, );
 					code_3 = quote!( #code_3 #pref_variant_name, );
-					if n_field > 0
+					if has_fields
 					{	code_5 = quote!( (#code_5) );
 					}
 					code_4 = quote!( #code_4 EnumVariant::#pref_variant_name => Self::#variant_name #code_5, );
@@ -313,6 +314,7 @@ fn impl_debug_to_json(ast: &DeriveInput) -> Result<TokenStream, String>
 				{	let variant_name_str = variant_name_str.unwrap_or_else(|| variant_name.to_string());
 					let fmt = format!("{{{{\"{}\":\"{}\"", escape(&enum_json_name), escape(&variant_name_str));
 					code_3 = quote!( #code_3 write!(f, #fmt)?; );
+					has_named_fields = true;
 				}
 				for json_name in json_names
 				{	let is_transient = json_name.is_empty();
