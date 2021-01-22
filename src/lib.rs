@@ -5,8 +5,9 @@ extern crate proc_macro;
 extern crate proc_macro2;
 
 use crate::proc_macro::TokenStream;
+use crate::proc_macro2::Span;
 use quote::quote;
-use syn::{self, DeriveInput, Data, Attribute, Ident, export::Span, Meta, NestedMeta, Lit, LitByteStr, ImplGenerics, TypeGenerics, GenericParam};
+use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, ImplGenerics, TypeGenerics, GenericParam};
 use std::borrow::Cow;
 
 const HEX_DIGITS: [u8; 16] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'A', b'B', b'C', b'D', b'E', b'F'];
