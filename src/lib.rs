@@ -7,8 +7,9 @@ extern crate proc_macro2;
 use crate::proc_macro::TokenStream;
 use crate::proc_macro2::Span;
 use quote::quote;
-use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, ImplGenerics, TypeGenerics, GenericParam};
+use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, Generics, ImplGenerics, TypeGenerics, GenericParam, TypeParam};
 use std::borrow::Cow;
+use std::mem;
 
 const HEX_DIGITS: [u8; 16] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'A', b'B', b'C', b'D', b'E', b'F'];
 
@@ -79,7 +80,7 @@ fn escape(s: &str) -> Cow<str>
 /// See nop_json crate for details.
 #[proc_macro_derive(TryFromJson, attributes(json))]
 pub fn derive_try_from_json(input: TokenStream) -> TokenStream
-{	let ast: &DeriveInput = &syn::parse(input).unwrap();
+{	let ast: &mut DeriveInput = &mut syn::parse(input).unwrap();
 	match impl_try_from_json(ast)
 	{	Ok(ts) => ts,
 		Err(error) =>
@@ -88,7 +89,7 @@ pub fn derive_try_from_json(input: TokenStream) -> TokenStream
 	}
 }
 
-fn impl_try_from_json(ast: &DeriveInput) -> Result<TokenStream, String>
+fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 {	let name = &ast.ident;
 	let mut code = quote!();
 	let mut code_2 = quote!();
@@ -229,7 +230,7 @@ fn impl_try_from_json(ast: &DeriveInput) -> Result<TokenStream, String>
 		},
 	};
 	// get generic parameters of this type (like struct<T> {...})
-	let (impl_generics, ty_generics, where_clause) = get_generics(ast);
+	let (impl_generics, ty_generics, where_clause) = get_generics_debug_to_json(&ast.generics);
 	code = quote!
 	{	impl #impl_generics nop_json::TryFromJson for #name #ty_generics #where_clause
 		{	fn try_from_json<T>(reader: &mut nop_json::Reader<T>) -> std::io::Result<Self> where T: Iterator<Item=u8>
@@ -265,8 +266,8 @@ fn impl_try_from_json(ast: &DeriveInput) -> Result<TokenStream, String>
 /// See nop_json crate for details.
 #[proc_macro_derive(DebugToJson, attributes(json))]
 pub fn derive_debug_to_json(input: TokenStream) -> TokenStream
-{	let ast: &DeriveInput = &syn::parse(input).unwrap();
-	match impl_debug_to_json(ast)
+{	let ast: &mut DeriveInput = &mut syn::parse(input).unwrap();
+	match impl_debug_or_write_to_json(ast, false)
 	{	Ok(ts) => ts,
 		Err(error) =>
 		{	panic!(error);
@@ -274,7 +275,7 @@ pub fn derive_debug_to_json(input: TokenStream) -> TokenStream
 	}
 }
 
-fn impl_debug_to_json(ast: &DeriveInput) -> Result<TokenStream, String>
+fn impl_debug_or_write_to_json(ast: &mut DeriveInput, is_write_to_json: bool) -> Result<TokenStream, String>
 {	let name = &ast.ident; // struct or enum name
 	let mut code = quote!();
 	match &ast.data
@@ -290,16 +291,21 @@ fn impl_debug_to_json(ast: &DeriveInput) -> Result<TokenStream, String>
 						else
 						{	format!(",\"{}\":", escape(&json_str))
 						};
-						code = quote!( #code write!(f, #fmt)?; nop_json::DebugToJson::fmt(&self.#field_name, f)?; );
+						code = if !is_write_to_json
+						{	quote!( #code write!(out, #fmt)?; nop_json::DebugToJson::fmt(&self.#field_name, out)?; )
+						}
+						else
+						{	quote!( #code write!(out, #fmt)?; nop_json::WriteToJson::write_to_json(&self.#field_name, out)?; )
+						};
 						n_field += 1;
 					}
 				}
 			}
 			if n_field == 0
-			{	code = quote!( #code write!(f, "{{}}") );
+			{	code = quote!( #code write!(out, "{{}}") );
 			}
 			else
-			{	code = quote!( #code write!(f, "}}") );
+			{	code = quote!( #code write!(out, "}}") );
 			}
 		},
 		Data::Enum(data_enum) =>
@@ -314,7 +320,7 @@ fn impl_debug_to_json(ast: &DeriveInput) -> Result<TokenStream, String>
 				if !enum_json_name.is_empty()
 				{	let variant_name_str = variant_name_str.unwrap_or_else(|| variant_name.to_string());
 					let fmt = format!("{{{{\"{}\":\"{}\"", escape(&enum_json_name), escape(&variant_name_str));
-					code_3 = quote!( #code_3 write!(f, #fmt)?; );
+					code_3 = quote!( #code_3 write!(out, #fmt)?; );
 					has_named_fields = true;
 				}
 				for json_name in json_names
@@ -330,7 +336,12 @@ fn impl_debug_to_json(ast: &DeriveInput) -> Result<TokenStream, String>
 						else
 						{	format!(",\"{}\":", escape(&json_name))
 						};
-						code_3 = quote!( #code_3 write!(f, #fmt)?; nop_json::DebugToJson::fmt(#val_field, f)?; );
+						code_3 = if !is_write_to_json
+						{	quote!( #code_3 write!(out, #fmt)?; nop_json::DebugToJson::fmt(#val_field, out)?; )
+						}
+						else
+						{	quote!( #code_3 write!(out, #fmt)?; nop_json::WriteToJson::write_to_json(#val_field, out)?; )
+						};
 						has_named_fields = true;
 					}
 					//
@@ -340,31 +351,47 @@ fn impl_debug_to_json(ast: &DeriveInput) -> Result<TokenStream, String>
 				{	code_2 = quote!( (#code_2) );
 				}
 				if !has_named_fields
-				{	code_3 = quote!( #code_3 write!(f, "{{")?; );
+				{	code_3 = quote!( #code_3 write!(out, "{{")?; );
 				}
 				code = quote!( #code #name::#variant_name #code_2 => {#code_3} );
 			}
-			code = quote!( match *self {#code} write!(f, "}}") );
+			code = quote!( match *self {#code} write!(out, "}}") );
 		},
 		Data::Union(_data_union) =>
 		{	return Err("Cannot serialize union".to_string());
 		},
 	};
-	// get generic parameters of this type (like struct<T> {...})
-	let (impl_generics, ty_generics, where_clause) = get_generics(ast);
-	// produce the impl DebugToJson and impl Debug
-	code = quote!
-	{	impl #impl_generics nop_json::DebugToJson for #name #ty_generics #where_clause
-		{	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result
-			{	#code
+	// produce the impl
+	if !is_write_to_json
+	{	// get generic parameters of this type (like struct<T> {...})
+		let (impl_generics, ty_generics, where_clause) = get_generics_debug_to_json(&ast.generics);
+		// impl DebugToJson and impl Debug
+		code = quote!
+		{	impl #impl_generics nop_json::DebugToJson for #name #ty_generics #where_clause
+			{	fn fmt(&self, out: &mut std::fmt::Formatter) -> std::fmt::Result
+				{	#code
+				}
 			}
-		}
-		impl #impl_generics std::fmt::Debug for #name #ty_generics #where_clause
-		{	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result
-			{	nop_json::DebugToJson::fmt(self, f)
+			impl #impl_generics std::fmt::Debug for #name #ty_generics #where_clause
+			{	fn fmt(&self, out: &mut std::fmt::Formatter) -> std::fmt::Result
+				{	nop_json::DebugToJson::fmt(self, out)
+				}
 			}
-		}
-	};
+		};
+	}
+	else
+	{	// get generic parameters of this type (like struct<T> {...})
+		let mut generics = mem::take(&mut ast.generics);
+		let (impl_generics, ty_generics, where_clause) = get_generics_write_to_json(&mut generics);
+		// impl WriteToJson
+		code = quote!
+		{	impl #impl_generics nop_json::WriteToJson<WriteToJsonPriv1> for #name #ty_generics #where_clause
+			{	fn write_to_json(&self, out: &mut WriteToJsonPriv1) -> std::io::Result<()>
+				{	#code
+				}
+			}
+		};
+	}
 	// to see what i produced, uncomment the panic!() below, and try to compile your code with #[derive(DebugToJson)]
 //panic!(code.to_string());
 	// done
@@ -502,12 +529,12 @@ fn parse_json_attr_sub(attrs: &Vec<Attribute>, n_fields: usize, is_enum: bool) -
 }
 
 /// get generic parameters of this type (like struct<T> {...})
-fn get_generics(ast: &DeriveInput) -> (ImplGenerics, TypeGenerics, proc_macro2::TokenStream)
-{	let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
+fn get_generics_debug_to_json(generics: &Generics) -> (ImplGenerics, TypeGenerics, proc_macro2::TokenStream)
+{	let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 	// for each generic type add where: DebugToJson
 	let mut wher = quote!();
 	let mut i = 0;
-	for p in &ast.generics.params
+	for p in &generics.params
 	{	match p
 		{	GenericParam::Type(ty) =>
 			{	let ty = &ty.ident;
@@ -527,4 +554,42 @@ fn get_generics(ast: &DeriveInput) -> (ImplGenerics, TypeGenerics, proc_macro2::
 	{	wher = quote!(#where_clause);
 	}
 	(impl_generics, ty_generics, wher)
+}
+
+/// get generic parameters of this type (like struct<T> {...})
+fn get_generics_write_to_json(generics: &mut Generics) -> (ImplGenerics, proc_macro2::TokenStream, proc_macro2::TokenStream)
+{	let (_impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+	// for each generic type add where: WriteToJson
+	let mut wher = if where_clause.is_none() {quote!(where WriteToJsonPriv1: std::io::Write)} else {quote!(#where_clause, WriteToJsonPriv1: std::io::Write)};
+	for p in &generics.params
+	{	match p
+		{	GenericParam::Type(ty) =>
+			{	let ty = &ty.ident;
+				wher = quote!( #wher, #ty: nop_json::WriteToJson<WriteToJsonPriv1> );
+			},
+			_=> {},
+		}
+	}
+	// add WriteToJsonPriv1 to impl_generics, but not to ty_generics
+	let ty_generics = quote!(#ty_generics);
+	let ident = Ident::new("WriteToJsonPriv1", Span::call_site());
+	generics.params.push(GenericParam::Type(TypeParam {attrs: Default::default(), ident, colon_token: None, bounds: Default::default(), eq_token: None, default: None}));
+	let impl_generics = generics.split_for_impl().0;
+	(impl_generics, ty_generics, wher)
+}
+
+
+/// To generate WriteToJson implementation for any struct or enum, where all members also implement WriteToJson
+/// use `#[derive(WriteToJson)]`.
+///
+/// See nop_json crate for details.
+#[proc_macro_derive(WriteToJson, attributes(json))]
+pub fn derive_write_to_json(input: TokenStream) -> TokenStream
+{	let ast: &mut DeriveInput = &mut syn::parse(input).unwrap();
+	match impl_debug_or_write_to_json(ast, true)
+	{	Ok(ts) => ts,
+		Err(error) =>
+		{	panic!(error);
+		}
+	}
 }
