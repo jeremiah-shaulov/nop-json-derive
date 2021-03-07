@@ -117,10 +117,10 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 					}
 					// code_3
 					if !is_transient
-					{	code_3 = quote!( #code_3 #field_name: #field_name.or_default().ok_or_else(|| reader.format_error(concat!("Member \"", #json_str, "\" doesn't have default value. To make optional #[derive(Default)]")))?, );
+					{	code_3 = quote!( #code_3 #field_name: #field_name.unwrap_or_default(), );
 					}
 					else
-					{	code_3 = quote!( #code_3 #field_name: None.or_default().ok_or_else(|| reader.format_error(concat!("Transient member \"", #json_str, "\" must be #[derive(Default)]")))?, );
+					{	code_3 = quote!( #code_3 #field_name: Default::default(), );
 					}
 				}
 			}
@@ -140,14 +140,13 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				for json_name in json_names
 				{	if !json_name.is_empty() // if not transient
 					{	let val_field = Ident::new(&format!("val_{}_{}", variant_name, n_field), Span::call_site());
-						code_5 = quote!( #code_5 #val_field.or_default().ok_or_else(|| reader.format_error(concat!("Field ", #json_name, " is required")))?, );
-						fields.push((n_variant, variant_name, json_name, val_field));
+						code_5 = quote!( #code_5 #val_field.unwrap_or_default(), );
+						fields.push((n_variant, json_name, val_field));
 						n_field += 1;
 					}
 					else
-					{	fields.push((n_variant, variant_name, json_name, Ident::new("u", Span::call_site())));
-						let variant_name = variant_name.to_string();
-						code_5 = quote!( #code_5 None.or_default().ok_or_else(|| reader.format_error(concat!("Transient member of variant \"", #variant_name, "\" must be #[derive(Default)]")))?, );
+					{	fields.push((n_variant, json_name, Ident::new("u", Span::call_site())));
+						code_5 = quote!( #code_5 Default::default(), );
 					}
 				}
 				let pref_variant_name = Ident::new(&format!("Var{}", variant_name), Span::call_site());
@@ -176,7 +175,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				};
 			}
 			let mut code_5 = quote!();
-			for (_n_variant, _variant_name, json_name, val_field) in &fields
+			for (_n_variant, json_name, val_field) in &fields
 			{	if !json_name.is_empty() // if not transient
 				{	// code
 					code = quote!( #code let mut #val_field = None; );
@@ -200,15 +199,14 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				{	let mut code_6 = quote!();
 					let mut code_7 = quote!();
 					let mut has_fields = false;
-					for (n_variant, variant_name, json_name, val_field) in &fields
+					for (n_variant, json_name, val_field) in &fields
 					{	if *n_variant == i
 						{	if !json_name.is_empty() // if not transient
 							{	code_6 = quote!( #code_6 Some(#val_field), );
 								code_7 = quote!( #code_7 #val_field, );
 							}
 							else
-							{	let variant_name = variant_name.to_string();
-								code_7 = quote!( #code_7 None.or_default().ok_or_else(|| reader.format_error(concat!("Transient member of variant \"", #variant_name, "\" must be #[derive(Default)]")))?, );
+							{	code_7 = quote!( #code_7 Default::default(), );
 							}
 							has_fields = true;
 						}
@@ -234,8 +232,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 	code = quote!
 	{	impl #impl_generics nop_json::TryFromJson for #name #ty_generics #where_clause
 		{	fn try_from_json<T>(reader: &mut nop_json::Reader<T>) -> std::io::Result<Self> where T: Iterator<Item=u8>
-			{	use nop_json::OrDefault;
-				use nop_json::OkFromJson;
+			{	use nop_json::ValidateJson;
 				#code
 				reader.read_object_use_buffer
 				(	|reader|
@@ -249,7 +246,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 					}
 				)?;
 				#code_3;
-				result.ok_from_json().map_err(|msg| reader.format_error(&msg))
+				result.validate_json().map_err(|msg| reader.format_error(&msg))
 			}
 		}
 	};
@@ -592,4 +589,32 @@ pub fn derive_write_to_json(input: TokenStream) -> TokenStream
 		{	panic!(error);
 		}
 	}
+}
+
+/// To generate ValidateJson implementation that always passes the validation use `#[derive(ValidateJson)]`.
+///
+/// See nop_json crate for details.
+#[proc_macro_derive(ValidateJson)]
+pub fn derive_validate_json(input: TokenStream) -> TokenStream
+{	let ast: &mut DeriveInput = &mut syn::parse(input).unwrap();
+	match impl_validate_json(ast)
+	{	Ok(ts) => ts,
+		Err(error) =>
+		{	panic!(error);
+		}
+	}
+}
+
+fn impl_validate_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
+{	let name = &ast.ident; // struct or enum name
+	// get generic parameters of this type (like struct<T> {...})
+	let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
+	// impl WriteToJson
+	let code = quote!
+	{	impl #impl_generics nop_json::ValidateJson for #name #ty_generics #where_clause {}
+	};
+	// to see what i produced, uncomment the panic!() below, and try to compile your code with #[derive(ValidateJson)]
+//panic!(code.to_string());
+	// done
+	Ok(code.into())
 }
