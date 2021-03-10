@@ -10,6 +10,7 @@ use quote::quote;
 use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, Generics, ImplGenerics, TypeGenerics, GenericParam, TypeParam};
 use std::borrow::Cow;
 use std::mem;
+use std::collections::HashMap;
 
 const HEX_DIGITS: [u8; 16] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'A', b'B', b'C', b'D', b'E', b'F'];
 
@@ -128,31 +129,56 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 		},
 		Data::Enum(data_enum) =>
 		{	let enum_json_name = get_json_name(&ast.attrs, "enum")?.unwrap_or_default();
+			let mut variants = Vec::new();
 			let mut fields = Vec::new();
-			let mut n_variant = 0;
-			let mut code_4 = quote!();
+			let mut fields_by_json_name = HashMap::new();
 			for variant in &data_enum.variants
 			{	let variant_name = &variant.ident;
 				let (variant_name_str, json_names) = get_json_name_for_enum_variant(&variant.attrs, variant_name, variant.fields.len())?;
+				let variant_name_str = variant_name_str.unwrap_or_else(|| variant_name.to_string());
 				let mut n_field = 0;
-				let mut code_5 = quote!();
-				let has_fields = !json_names.is_empty();
-				for json_name in json_names
+				for json_name in &json_names
 				{	if !json_name.is_empty() // if not transient
-					{	let val_field = Ident::new(&format!("val_{}_{}", variant_name, n_field), Span::call_site());
-						code_5 = quote!( #code_5 #val_field.unwrap_or_default(), );
-						fields.push((n_variant, json_name, val_field));
+					{	let cur = fields_by_json_name.get_mut(json_name);
+						match cur
+						{	None =>
+							{	fields_by_json_name.insert(json_name.clone(), (Ident::new(&format!("val_{}_{}", variant_name, n_field), Span::call_site()), 1));
+							}
+							Some(cur) =>
+							{	cur.1 += 1;
+							}
+						}
+						let (val_field, n_occurances) = fields_by_json_name.get(json_name).unwrap();
+						fields.push((variants.len(), json_name.clone(), val_field.clone(), *n_occurances>1));
 						n_field += 1;
 					}
 					else
-					{	fields.push((n_variant, json_name, Ident::new("u", Span::call_site())));
-						code_5 = quote!( #code_5 Default::default(), );
+					{	fields.push((variants.len(), json_name.clone(), Ident::new("u", Span::call_site()), false));
+					}
+				}
+				variants.push((variant_name, variant_name_str, json_names));
+			}
+			let mut code_4 = quote!();
+			for (variant_name, variant_name_str, json_names) in &variants
+			{	let mut code_5 = quote!();
+				let has_fields = !json_names.is_empty();
+				for json_name in json_names
+				{	if !json_name.is_empty() // if not transient
+					{	let (val_field, n_occurances) = fields_by_json_name.get(json_name).unwrap();
+						if *n_occurances <= 1
+						{	code_5 = quote!( #code_5 #val_field.unwrap_or_default(), );
+						}
+						else
+						{	code_5 = quote!( #code_5 #val_field.try_into().unwrap_or_default(), );
+						}
+					}
+					else
+					{	code_5 = quote!( #code_5 Default::default(), );
 					}
 				}
 				let pref_variant_name = Ident::new(&format!("Var{}", variant_name), Span::call_site());
 				if !enum_json_name.is_empty()
-				{	let variant_name_str = variant_name_str.unwrap_or_else(|| variant_name.to_string());
-					let b = LitByteStr::new(variant_name_str.as_bytes(), Span::call_site());
+				{	let b = LitByteStr::new(variant_name_str.as_bytes(), Span::call_site());
 					code_2 = quote!( #code_2 #b => EnumVariant::#pref_variant_name, );
 					code_3 = quote!( #code_3 #pref_variant_name, );
 					if has_fields
@@ -160,7 +186,6 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 					}
 					code_4 = quote!( #code_4 EnumVariant::#pref_variant_name => Self::#variant_name #code_5, );
 				}
-				n_variant += 1;
 			}
 			if !enum_json_name.is_empty()
 			{	code = quote!( enum EnumVariant {Invalid, #code_3} let mut enum_variant_field = EnumVariant::Invalid; );
@@ -175,13 +200,23 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				};
 			}
 			let mut code_5 = quote!();
-			for (_n_variant, json_name, val_field) in &fields
+			for (_n_variant, json_name, val_field, is_dup_json_name) in &fields
 			{	if !json_name.is_empty() // if not transient
 				{	// code
-					code = quote!( #code let mut #val_field = None; );
+					let (_val_field, n_occurances) = fields_by_json_name.get(json_name).unwrap();
+					if *n_occurances <= 1
+					{	// is not one of duplicate json names
+						code = quote!( #code let mut #val_field = None; );
+					}
+					else if !*is_dup_json_name
+					{	// is first occurance of duplicate json name
+						code = quote!( #code let mut #val_field = nop_json::Value::Null; );
+					}
 					// code_2
-					let b = LitByteStr::new(json_name.as_bytes(), Span::call_site());
-					code_2 = quote!( #code_2 #b => #val_field = reader.read_prop(#json_name)?, );
+					if !*is_dup_json_name
+					{	let b = LitByteStr::new(json_name.as_bytes(), Span::call_site());
+						code_2 = quote!( #code_2 #b => #val_field = reader.read_prop(#json_name)?, );
+					}
 					// code_5
 					code_5 = quote!( #code_5 #val_field, );
 				}
@@ -199,7 +234,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				{	let mut code_6 = quote!();
 					let mut code_7 = quote!();
 					let mut has_fields = false;
-					for (n_variant, json_name, val_field) in &fields
+					for (n_variant, json_name, val_field, _is_dup_json_name) in &fields
 					{	if *n_variant == i
 						{	if !json_name.is_empty() // if not transient
 							{	code_6 = quote!( #code_6 Some(#val_field), );
@@ -233,6 +268,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 	{	impl #impl_generics nop_json::TryFromJson for #name #ty_generics #where_clause
 		{	fn try_from_json<T>(reader: &mut nop_json::Reader<T>) -> std::io::Result<Self> where T: Iterator<Item=u8>
 			{	use nop_json::ValidateJson;
+				use std::convert::TryInto;
 				#code
 				reader.read_object_use_buffer
 				(	|reader|
