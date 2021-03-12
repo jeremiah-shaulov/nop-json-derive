@@ -10,7 +10,7 @@ use quote::quote;
 use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, Generics, ImplGenerics, TypeGenerics, GenericParam, TypeParam};
 use std::borrow::Cow;
 use std::mem;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const HEX_DIGITS: [u8; 16] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'A', b'B', b'C', b'D', b'E', b'F'];
 
@@ -79,7 +79,7 @@ fn escape(s: &str) -> Cow<str>
 /// use `#[derive(TryFromJson)]`.
 ///
 /// See nop_json crate for details.
-#[proc_macro_derive(TryFromJson, attributes(json))]
+#[proc_macro_derive(TryFromJson, attributes(json, json_ignore))]
 pub fn derive_try_from_json(input: TokenStream) -> TokenStream
 {	let ast: &mut DeriveInput = &mut syn::parse(input).unwrap();
 	match impl_try_from_json(ast)
@@ -92,6 +92,8 @@ pub fn derive_try_from_json(input: TokenStream) -> TokenStream
 
 fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 {	let name = &ast.ident;
+	let mut json_ignore = HashSet::new();
+	let mut is_ignore_all = get_json_ignore(&ast.attrs, &mut json_ignore, false)?;
 	let mut code = quote!();
 	let mut code_2 = quote!();
 	let mut code_3 = quote!();
@@ -135,6 +137,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 			for variant in &data_enum.variants
 			{	let variant_name = &variant.ident;
 				let (variant_name_str, json_names) = get_json_name_for_enum_variant(&variant.attrs, variant_name, variant.fields.len())?;
+				is_ignore_all = get_json_ignore(&variant.attrs, &mut json_ignore, is_ignore_all)?;
 				let variant_name_str = variant_name_str.unwrap_or_else(|| variant_name.to_string());
 				let mut n_field = 0;
 				for json_name in &json_names
@@ -262,6 +265,20 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 		{	return Err("Cannot deserialize union".to_string());
 		},
 	};
+	// ignore?
+	let code_8 = if is_ignore_all
+	{	// ignore all
+		quote!( _ => { reader.read::<()>()? })
+	}
+	else
+	{	let mut code_8 = quote!();
+		// ignore only names from "json_ignore"
+		for json_name in json_ignore
+		{	let b = LitByteStr::new(json_name.as_bytes(), Span::call_site());
+			code_8 = quote!( #code_8 #b => { reader.read::<()>()? }, );
+		}
+		quote!( #code_8 _ => {return Err(reader.format_error_fmt(format_args!("Invalid property: {}", String::from_utf8_lossy(reader.get_key()))))} )
+	};
 	// get generic parameters of this type (like struct<T> {...})
 	let (impl_generics, ty_generics, where_clause) = get_generics_debug_to_json(&ast.generics);
 	code = quote!
@@ -274,9 +291,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				(	|reader|
 					{	match reader.get_key()
 						{	#code_2
-							_ =>
-							{	return Err(reader.format_error_fmt(format_args!("Invalid property: {}", String::from_utf8_lossy(reader.get_key()))))
-							}
+							#code_8
 						}
 						Ok(())
 					}
@@ -470,13 +485,13 @@ fn parse_json_attr_sub(attrs: &Vec<Attribute>, n_fields: usize, is_enum: bool) -
 					{	match a
 						{	NestedMeta::Lit(Lit::Str(s)) =>
 							{	if group_name.is_some() && !is_var_str
-								{	return Err(String::new());
+								{	return Err("Couldn't interpret #[json] attribute".to_string());
 								}
 								json_names.push(s.value());
 							},
 							NestedMeta::Meta(Meta::Path(meta)) =>
 							{	if group_name.is_some() && !is_var_str
-								{	return Err(String::new());
+								{	return Err("Couldn't interpret #[json] attribute".to_string());
 								}
 								if let Some(name) = meta.get_ident()
 								{	json_names.push(name.to_string());
@@ -485,7 +500,7 @@ fn parse_json_attr_sub(attrs: &Vec<Attribute>, n_fields: usize, is_enum: bool) -
 							NestedMeta::Meta(Meta::List(list)) =>
 							{	if is_enum
 								{	if json_names.len() > 0
-									{	return Err(String::new());
+									{	return Err("Couldn't interpret #[json] attribute".to_string());
 									}
 									if let Some(name) = list.path.get_ident()
 									{	group_name = Some(name.to_string());
@@ -500,23 +515,23 @@ fn parse_json_attr_sub(attrs: &Vec<Attribute>, n_fields: usize, is_enum: bool) -
 													}
 												},
 												_ =>
-												{	return Err(String::new());
+												{	return Err("Couldn't interpret #[json] attribute".to_string());
 												}
 											}
 										}
 									}
 									if json_names.len() == 0
-									{	return Err(String::new());
+									{	return Err("Couldn't interpret #[json] attribute".to_string());
 									}
 								}
 								else
-								{	return Err(String::new());
+								{	return Err("Couldn't interpret #[json] attribute".to_string());
 								}
 							},
 							NestedMeta::Meta(Meta::NameValue(list)) =>
 							{	if is_enum
 								{	if group_name.is_some()
-									{	return Err(String::new());
+									{	return Err("Couldn't interpret #[json] attribute".to_string());
 									}
 									if list.path.is_ident("var")
 									{	match list.lit
@@ -528,15 +543,15 @@ fn parse_json_attr_sub(attrs: &Vec<Attribute>, n_fields: usize, is_enum: bool) -
 										}
 									}
 									if group_name.is_none()
-									{	return Err(String::new());
+									{	return Err("Couldn't interpret #[json] attribute".to_string());
 									}
 								}
 								else
-								{	return Err(String::new());
+								{	return Err("Couldn't interpret #[json] attribute".to_string());
 								}
 							},
 							_ =>
-							{	return Err(String::new());
+							{	return Err("Couldn't interpret #[json] attribute".to_string());
 							}
 						}
 					}
@@ -559,6 +574,47 @@ fn parse_json_attr_sub(attrs: &Vec<Attribute>, n_fields: usize, is_enum: bool) -
 		}
 	}
 	Ok((group_name, json_names))
+}
+
+fn get_json_ignore(attrs: &Vec<Attribute>, json_ignore: &mut HashSet<String>, is_ignore_all: bool) -> Result<bool, String>
+{	let mut has_ignore = false;
+	for a in attrs
+	{	match a.parse_meta()
+		{	Ok(Meta::Path(path)) =>
+			{	if path.is_ident("json_ignore")
+				{	has_ignore = true;
+				}
+			},
+			Ok(Meta::List(list)) =>
+			{	if list.path.is_ident("json_ignore")
+				{	has_ignore = true;
+					for a in list.nested
+					{	match a
+						{	NestedMeta::Lit(Lit::Str(s)) =>
+							{	if is_ignore_all
+								{	return Err("#[json_ignore] after ignoring all".to_string());
+								}
+								json_ignore.insert(s.value());
+							},
+							NestedMeta::Meta(Meta::Path(meta)) =>
+							{	if let Some(name) = meta.get_ident()
+								{	if is_ignore_all
+									{	return Err("#[json_ignore] after ignoring all".to_string());
+									}
+									json_ignore.insert(name.to_string());
+								}
+							},
+							_ =>
+							{
+							}
+						}
+					}
+				}
+			},
+			_ => {}
+		}
+	}
+	Ok(is_ignore_all || has_ignore && json_ignore.is_empty())
 }
 
 /// get generic parameters of this type (like struct<T> {...})
