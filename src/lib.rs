@@ -1,13 +1,10 @@
 //! This is helper crate intended to be used internally in nop_json crate.
 //! Don't use it directly. See nop_json crate for details.
 
-extern crate proc_macro;
-extern crate proc_macro2;
-
-use crate::proc_macro::TokenStream;
-use crate::proc_macro2::Span;
+use proc_macro::TokenStream;
+use proc_macro2::Span;
 use quote::quote;
-use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, Generics, ImplGenerics, TypeGenerics, GenericParam, TypeParam};
+use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, LitStr, Generics, ImplGenerics, TypeGenerics, GenericParam, TypeParam};
 use std::borrow::Cow;
 use std::mem;
 use std::collections::{HashMap, HashSet};
@@ -92,8 +89,9 @@ pub fn derive_try_from_json(input: TokenStream) -> TokenStream
 
 fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 {	let name = &ast.ident;
-	let mut json_ignore = HashSet::new();
-	let mut is_ignore_all = get_json_ignore(&ast.attrs, &mut json_ignore, false)?;
+	let mut json_ignore = HashMap::new();
+	let mut is_ignore_all = get_json_ignore(&ast.attrs, usize::MAX, &mut json_ignore, false)?;
+	let mut variants = Vec::new();
 	let mut code = quote!();
 	let mut code_2 = quote!();
 	let mut code_3 = quote!();
@@ -131,13 +129,13 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 		},
 		Data::Enum(data_enum) =>
 		{	let enum_json_name = get_json_name(&ast.attrs, "enum")?.unwrap_or_default();
-			let mut variants = Vec::new();
 			let mut fields = Vec::new();
 			let mut fields_by_json_name = HashMap::new();
-			for variant in &data_enum.variants
+			// scan variants
+			for (n_variant, variant) in data_enum.variants.iter().enumerate()
 			{	let variant_name = &variant.ident;
 				let (variant_name_str, json_names) = get_json_name_for_enum_variant(&variant.attrs, variant_name, variant.fields.len())?;
-				is_ignore_all = get_json_ignore(&variant.attrs, &mut json_ignore, is_ignore_all)?;
+				is_ignore_all = get_json_ignore(&variant.attrs, n_variant, &mut json_ignore, is_ignore_all)?;
 				let variant_name_str = variant_name_str.unwrap_or_else(|| variant_name.to_string());
 				let mut n_field = 0;
 				for json_name in &json_names
@@ -161,8 +159,30 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				}
 				variants.push((variant_name, variant_name_str, json_names));
 			}
+			// scan json_ignore
+			let mut enum_variant_cannot_be = HashMap::new();
+			for (_json_name, ignore_in_variants) in &json_ignore
+			{	if ignore_in_variants.len() != variants.len() && !ignore_in_variants.contains(&usize::MAX)
+				{	for (n_variant, (variant_name, _variant_name_str, _json_names)) in variants.iter().enumerate()
+					{	if !ignore_in_variants.contains(&n_variant)
+						{	let enum_name = LitStr::new(&format!("{}::{}", name, variant_name), Span::call_site());
+							let code_c = quote!
+							(	if let Some(prop_name) = enum_variant_cannot_be[#n_variant]
+								{	return Err(reader.format_error_fmt(format_args!("Field {} is invalid in variant {}", String::from_utf8_lossy(prop_name), #enum_name)));
+								}
+							);
+							enum_variant_cannot_be.insert(n_variant, code_c);
+						}
+					}
+				}
+			}
+			if !enum_variant_cannot_be.is_empty()
+			{	let n_variants = variants.len();
+				code = quote!( #code let mut enum_variant_cannot_be = [None; #n_variants]; );
+			}
+			// form resulting code parts
 			let mut code_4 = quote!();
-			for (variant_name, variant_name_str, json_names) in &variants
+			for (n_variant, (variant_name, variant_name_str, json_names)) in variants.iter().enumerate()
 			{	let mut code_5 = quote!();
 				let has_fields = !json_names.is_empty();
 				for json_name in json_names
@@ -187,11 +207,15 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 					if has_fields
 					{	code_5 = quote!( (#code_5) );
 					}
-					code_4 = quote!( #code_4 EnumVariant::#pref_variant_name => Self::#variant_name #code_5, );
+					let mut code_c = quote!();
+					if let Some(code_c_2) = enum_variant_cannot_be.get(&n_variant)
+					{	code_c = quote!(#code_c #code_c_2);
+					};
+					code_4 = quote!( #code_4 EnumVariant::#pref_variant_name => {#code_c Self::#variant_name #code_5}, );
 				}
 			}
 			if !enum_json_name.is_empty()
-			{	code = quote!( enum EnumVariant {Invalid, #code_3} let mut enum_variant_field = EnumVariant::Invalid; );
+			{	code = quote!( #code enum EnumVariant {Invalid, #code_3} let mut enum_variant_field = EnumVariant::Invalid; );
 				let b = LitByteStr::new(enum_json_name.as_bytes(), Span::call_site());
 				code_2 = quote!
 				{	#b =>
@@ -202,6 +226,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 					},
 				};
 			}
+			//
 			let mut code_5 = quote!();
 			for (_n_variant, json_name, val_field, is_dup_json_name) in &fields
 			{	if !json_name.is_empty() // if not transient
@@ -233,12 +258,12 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				};
 			}
 			else
-			{	for i in 0..data_enum.variants.len()
+			{	for n_variant in 0..data_enum.variants.len()
 				{	let mut code_6 = quote!();
 					let mut code_7 = quote!();
 					let mut has_fields = false;
-					for (n_variant, json_name, val_field, _is_dup_json_name) in &fields
-					{	if *n_variant == i
+					for (field_n_variant, json_name, val_field, _is_dup_json_name) in &fields
+					{	if *field_n_variant == n_variant
 						{	if !json_name.is_empty() // if not transient
 							{	code_6 = quote!( #code_6 Some(#val_field), );
 								code_7 = quote!( #code_7 #val_field, );
@@ -255,8 +280,12 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 					if has_fields
 					{	code_7 = quote!( (#code_7) );
 					}
-					let variant_name = &data_enum.variants[i].ident;
-					code_3 = quote!( #code_3 (#code_6) => Self::#variant_name #code_7, );
+					let variant_name = &data_enum.variants[n_variant].ident;
+					let mut code_c = quote!();
+					if let Some(code_c_2) = enum_variant_cannot_be.get(&n_variant)
+					{	code_c = quote!(#code_c #code_c_2);
+					};
+					code_3 = quote!( #code_3 (#code_6) => {#code_c Self::#variant_name #code_7}, );
 				}
 				code_3 = quote!( let result = match (#code_5) { #code_3 _ => return Err(reader.format_error("Invalid combination of properties"))} );
 			}
@@ -273,9 +302,17 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 	else
 	{	let mut code_8 = quote!();
 		// ignore only names from "json_ignore"
-		for json_name in json_ignore
+		for (json_name, ignore_in_variants) in json_ignore
 		{	let b = LitByteStr::new(json_name.as_bytes(), Span::call_site());
-			code_8 = quote!( #code_8 #b => { reader.read::<()>()? }, );
+			let mut code_9 = quote!();
+			if ignore_in_variants.len() != variants.len() && !ignore_in_variants.contains(&usize::MAX)
+			{	for n in 0..variants.len()
+				{	if !ignore_in_variants.contains(&n)
+					{	code_9 = quote!( #code_9 enum_variant_cannot_be[#n] = Some(#b); );
+					}
+				}
+			}
+			code_8 = quote!( #code_8 #b => { reader.read::<()>()?; #code_9 }, );
 		}
 		quote!( #code_8 _ => {return Err(reader.format_error_fmt(format_args!("Invalid property: {}", String::from_utf8_lossy(reader.get_key()))))} )
 	};
@@ -576,7 +613,7 @@ fn parse_json_attr_sub(attrs: &Vec<Attribute>, n_fields: usize, is_enum: bool) -
 	Ok((group_name, json_names))
 }
 
-fn get_json_ignore(attrs: &Vec<Attribute>, json_ignore: &mut HashSet<String>, is_ignore_all: bool) -> Result<bool, String>
+fn get_json_ignore(attrs: &Vec<Attribute>, n_variant: usize, json_ignore: &mut HashMap<String, HashSet<usize>>, is_ignore_all: bool) -> Result<bool, String>
 {	let mut has_ignore = false;
 	for a in attrs
 	{	match a.parse_meta()
@@ -589,23 +626,38 @@ fn get_json_ignore(attrs: &Vec<Attribute>, json_ignore: &mut HashSet<String>, is
 			{	if list.path.is_ident("json_ignore")
 				{	has_ignore = true;
 					for a in list.nested
-					{	match a
+					{	let name = match a
 						{	NestedMeta::Lit(Lit::Str(s)) =>
 							{	if is_ignore_all
 								{	return Err("#[json_ignore] after ignoring all".to_string());
 								}
-								json_ignore.insert(s.value());
+								Some(s.value())
 							},
 							NestedMeta::Meta(Meta::Path(meta)) =>
 							{	if let Some(name) = meta.get_ident()
 								{	if is_ignore_all
 									{	return Err("#[json_ignore] after ignoring all".to_string());
 									}
-									json_ignore.insert(name.to_string());
+									Some(name.to_string())
+								}
+								else
+								{	None
 								}
 							},
 							_ =>
-							{
+							{	None
+							}
+						};
+						if let Some(name) = name
+						{	match json_ignore.get_mut(&name)
+							{	Some(variants) =>
+								{	variants.insert(n_variant);
+								}
+								None =>
+								{	let mut variants = HashSet::new();
+									variants.insert(n_variant);
+									json_ignore.insert(name, variants);
+								}
 							}
 						}
 					}
