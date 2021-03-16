@@ -178,7 +178,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 			}
 			if !enum_variant_cannot_be.is_empty()
 			{	let n_variants = variants.len();
-				code = quote!( #code let mut enum_variant_cannot_be = [None; #n_variants]; );
+				code = quote!( #code let mut enum_variant_cannot_be: [Option<&[u8]>; #n_variants] = [None; #n_variants]; );
 			}
 			// form resulting code parts
 			let mut code_4 = quote!();
