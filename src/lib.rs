@@ -4,7 +4,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, LitStr, Generics, ImplGenerics, TypeGenerics, GenericParam, TypeParam};
+use syn::{self, DeriveInput, Data, Attribute, Ident, Meta, NestedMeta, Lit, LitByteStr, Generics, ImplGenerics, TypeGenerics, GenericParam, TypeParam};
 use std::borrow::Cow;
 use std::mem;
 use std::collections::{HashMap, HashSet};
@@ -92,6 +92,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 	let mut json_ignore = HashMap::new();
 	let mut is_ignore_all = get_json_ignore(&ast.attrs, usize::MAX, &mut json_ignore, false)?;
 	let mut variants = Vec::new();
+	let mut enum_variant_cannot_be = HashMap::new();
 	let mut code = quote!();
 	let mut code_2 = quote!();
 	let mut code_3 = quote!();
@@ -160,25 +161,24 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 				variants.push((variant_name, variant_name_str, json_names));
 			}
 			// scan json_ignore
-			let mut enum_variant_cannot_be = HashMap::new();
-			for (_json_name, ignore_in_variants) in &json_ignore
+			for (json_name, ignore_in_variants) in &json_ignore
 			{	if ignore_in_variants.len() != variants.len() && !ignore_in_variants.contains(&usize::MAX)
-				{	for (n_variant, (variant_name, _variant_name_str, _json_names)) in variants.iter().enumerate()
-					{	if !ignore_in_variants.contains(&n_variant)
-						{	let enum_name = LitStr::new(&format!("{}::{}", name, variant_name), Span::call_site());
+				{	// if json_name is ignored not in all variants
+					for (n_variant, (variant_name, _variant_name_str, json_names)) in variants.iter().enumerate()
+					{	if !ignore_in_variants.contains(&n_variant) && !json_names.contains(json_name)
+						{	// if json_name is not ignored in variant n_variant
+							let enum_name = format!("{}::{}", name, variant_name);
+							let var_name = Ident::new(&format!("enum_variant_cannot_be_{}", n_variant), Span::call_site());
 							let code_c = quote!
-							(	if let Some(prop_name) = enum_variant_cannot_be[#n_variant]
+							(	if let Some(prop_name) = #var_name
 								{	return Err(reader.format_error_fmt(format_args!("Field {} is invalid in variant {}", String::from_utf8_lossy(prop_name), #enum_name)));
 								}
 							);
-							enum_variant_cannot_be.insert(n_variant, code_c);
+							code = quote!( #code let mut #var_name: Option<&[u8]> = None; );
+							enum_variant_cannot_be.insert(n_variant, (var_name, code_c));
 						}
 					}
 				}
-			}
-			if !enum_variant_cannot_be.is_empty()
-			{	let n_variants = variants.len();
-				code = quote!( #code let mut enum_variant_cannot_be: [Option<&[u8]>; #n_variants] = [None; #n_variants]; );
 			}
 			// form resulting code parts
 			let mut code_4 = quote!();
@@ -208,7 +208,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 					{	code_5 = quote!( (#code_5) );
 					}
 					let mut code_c = quote!();
-					if let Some(code_c_2) = enum_variant_cannot_be.get(&n_variant)
+					if let Some((_, code_c_2)) = enum_variant_cannot_be.get(&n_variant)
 					{	code_c = quote!(#code_c #code_c_2);
 					};
 					code_4 = quote!( #code_4 EnumVariant::#pref_variant_name => {#code_c Self::#variant_name #code_5}, );
@@ -282,7 +282,7 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 					}
 					let variant_name = &data_enum.variants[n_variant].ident;
 					let mut code_c = quote!();
-					if let Some(code_c_2) = enum_variant_cannot_be.get(&n_variant)
+					if let Some((_, code_c_2)) = enum_variant_cannot_be.get(&n_variant)
 					{	code_c = quote!(#code_c #code_c_2);
 					};
 					code_3 = quote!( #code_3 (#code_6) => {#code_c Self::#variant_name #code_7}, );
@@ -306,9 +306,12 @@ fn impl_try_from_json(ast: &mut DeriveInput) -> Result<TokenStream, String>
 		{	let b = LitByteStr::new(json_name.as_bytes(), Span::call_site());
 			let mut code_9 = quote!();
 			if ignore_in_variants.len() != variants.len() && !ignore_in_variants.contains(&usize::MAX)
-			{	for n in 0..variants.len()
-				{	if !ignore_in_variants.contains(&n)
-					{	code_9 = quote!( #code_9 enum_variant_cannot_be[#n] = Some(#b); );
+			{	// if json_name is ignored not in all variants
+				for (n_variant, (_variant_name, _variant_name_str, json_names)) in variants.iter().enumerate()
+				{	if !ignore_in_variants.contains(&n_variant) && !json_names.contains(&json_name)
+					{	// if json_name is not ignored in variant n_variant
+						let var_name = &enum_variant_cannot_be.get(&n_variant).unwrap().0;
+						code_9 = quote!( #code_9 #var_name = Some(#b); );
 					}
 				}
 			}
