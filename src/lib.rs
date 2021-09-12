@@ -82,7 +82,7 @@ pub fn derive_try_from_json(input: TokenStream) -> TokenStream
 	match impl_try_from_json(ast)
 	{	Ok(ts) => ts,
 		Err(error) =>
-		{	panic!(error);
+		{	panic!("{}", error);
 		}
 	}
 }
@@ -358,7 +358,7 @@ pub fn derive_debug_to_json(input: TokenStream) -> TokenStream
 	match impl_debug_or_write_to_json(ast, false)
 	{	Ok(ts) => ts,
 		Err(error) =>
-		{	panic!(error);
+		{	panic!("{}", error);
 		}
 	}
 }
@@ -733,7 +733,7 @@ pub fn derive_write_to_json(input: TokenStream) -> TokenStream
 	match impl_debug_or_write_to_json(ast, true)
 	{	Ok(ts) => ts,
 		Err(error) =>
-		{	panic!(error);
+		{	panic!("{}", error);
 		}
 	}
 }
@@ -747,7 +747,7 @@ pub fn derive_validate_json(input: TokenStream) -> TokenStream
 	match impl_validate_json(ast)
 	{	Ok(ts) => ts,
 		Err(error) =>
-		{	panic!(error);
+		{	panic!("{}", error);
 		}
 	}
 }
